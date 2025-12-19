@@ -1,0 +1,15 @@
+[
+  "length",
+  "has_lower",
+  "has_upper",
+  "has_digit",
+  "has_symbol",
+  "unique_ratio",
+  "longest_run",
+  "has_year_like",
+  "has_common_word",
+  "has_keyboard_walk",
+  "has_sequential_digits",
+  "entropy_bits",
+  "strength_score"
+]
