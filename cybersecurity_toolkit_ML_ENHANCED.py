@@ -742,14 +742,43 @@ class NetworkTools:
     def traceroute(host, max_hops=30):
         """Traceroute to host"""
         try:
-            cmd = 'tracert' if platform.system().lower() == 'windows' else 'traceroute'
-            result = subprocess.run([cmd, host], capture_output=True, text=True, timeout=60)
+            system = platform.system().lower()
+            
+            if system == 'windows':
+                cmd = ['tracert', '-h', str(max_hops), host]
+            elif system == 'darwin':  # macOS
+                cmd = ['traceroute', '-m', str(max_hops), host]
+            else:  # Linux
+                # Try traceroute first, fall back to tracepath if not available
+                try:
+                    subprocess.run(['traceroute', '--version'], capture_output=True, timeout=1)
+                    cmd = ['traceroute', '-m', str(max_hops), host]
+                except:
+                    # Use tracepath as fallback (usually available without sudo)
+                    cmd = ['tracepath', host]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            
+            # Check if command failed due to permissions or not found
+            if result.returncode != 0 and not result.stdout and 'not found' in result.stderr.lower():
+                return {
+                    'success': False,
+                    'error': f"Traceroute not found. Install with:\n  Ubuntu/Debian: sudo apt-get install traceroute\n  CentOS/RHEL: sudo yum install traceroute\n  macOS: Usually pre-installed\n  Windows: Use 'tracert' command"
+                }
             
             return {
                 'success': True,
-                'output': result.stdout,
+                'output': result.stdout if result.stdout else result.stderr,
                 'returncode': result.returncode
             }
+        except subprocess.TimeoutExpired:
+            return {'success': False, 'error': 'Traceroute timed out (120s limit)'}
+        except FileNotFoundError:
+            system = platform.system().lower()
+            if system == 'linux':
+                return {'success': False, 'error': 'Traceroute not found. Install: sudo apt-get install traceroute'}
+            else:
+                return {'success': False, 'error': 'Traceroute command not found'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -806,36 +835,48 @@ class NmapScanner:
     """Nmap integration"""
     
     @staticmethod
-    def scan(target, arguments='-sV'):
-        """Perform nmap scan"""
+    def scan(target, arguments='-sV', ports=None):
+        """Perform nmap scan with custom arguments"""
         if not NMAP_AVAILABLE:
             return {'success': False, 'error': 'python-nmap not installed'}
         
         try:
             nm = nmap.PortScanner()
-            nm.scan(target, arguments=arguments)
+            
+            # Scan with custom arguments
+            if ports:
+                nm.scan(target, ports=ports, arguments=arguments)
+            else:
+                nm.scan(target, arguments=arguments)
             
             results = {}
             for host in nm.all_hosts():
                 results[host] = {
                     'state': nm[host].state(),
-                    'protocols': {}
+                    'protocols': {},
+                    'hostname': nm[host].hostname(),
                 }
                 
+                # OS detection if available
+                if 'osmatch' in nm[host]:
+                    results[host]['osmatch'] = nm[host]['osmatch']
+                
                 for proto in nm[host].all_protocols():
-                    ports = nm[host][proto].keys()
                     results[host]['protocols'][proto] = {}
-                    
+                    ports = nm[host][proto].keys()
                     for port in ports:
                         port_info = nm[host][proto][port]
                         results[host]['protocols'][proto][port] = {
                             'state': port_info['state'],
-                            'name': port_info['name'],
+                            'name': port_info.get('name', 'unknown'),
                             'product': port_info.get('product', ''),
-                            'version': port_info.get('version', '')
+                            'version': port_info.get('version', ''),
+                            'extrainfo': port_info.get('extrainfo', ''),
                         }
             
-            return {'success': True, 'results': results, 'raw': nm.csv()}
+            return {'success': True, 'results': results}
+        except nmap.PortScannerError as e:
+            return {'success': False, 'error': f'Nmap error: {str(e)}'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -2223,70 +2264,315 @@ class CyberSecurityToolkit_GUI:
             self.master.after(0, lambda: self.shodan_output.insert(tk.END, f"Error: {result['error']}\n"))
     
     def create_nmap_tab(self):
-        """Nmap tab"""
+        """Nmap tab with comprehensive options"""
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="🛡 Nmap")
         
         header = tk.Frame(tab, bg=COLORS['accent_blue'], height=60)
         header.pack(fill='x')
-        tk.Label(header, text="🛡 Network Port Scanner",
+        tk.Label(header, text="🛡 Advanced Network Port Scanner (Nmap)",
                 font=('Arial', 16, 'bold'), bg=COLORS['accent_blue'],
                 fg=COLORS['text_white']).pack(pady=15)
         
         if not NMAP_AVAILABLE:
-            tk.Label(tab, text="⚠ Nmap library not installed\nRun: pip install python-nmap",
+            tk.Label(tab, text="⚠ Nmap library not installed\nRun: pip install python-nmap\n\nAlso install Nmap system tool:\n  Ubuntu/Debian: sudo apt-get install nmap\n  CentOS/RHEL: sudo yum install nmap\n  macOS: brew install nmap\n  Windows: Download from nmap.org",
                     font=('Arial', 12, 'bold'), fg=COLORS['warning'],
                     bg=COLORS['bg_medium']).pack(pady=50)
             return
         
-        # Input
-        input_frame = ttk.LabelFrame(tab, text="Configuration", padding=15)
+        # Input frame
+        input_frame = ttk.LabelFrame(tab, text="Scan Configuration", padding=10)
         input_frame.pack(fill='x', padx=10, pady=10)
         
+        # Target
         tk.Label(input_frame, text="Target:", font=('Arial', 10, 'bold'),
-                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=0, column=0, sticky='w', padx=5)
+                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=0, column=0, sticky='w', padx=5, pady=3)
         self.nmap_target = tk.Entry(input_frame, width=40, font=('Arial', 10))
-        self.nmap_target.grid(row=0, column=1, padx=5)
+        self.nmap_target.grid(row=0, column=1, columnspan=3, padx=5, pady=3, sticky='ew')
         self.nmap_target.insert(0, "scanme.nmap.org")
         
-        tk.Button(input_frame, text="🔍 Scan", command=self.do_nmap_scan,
-                 bg=COLORS['accent_green'], fg='white', font=('Arial', 11, 'bold')).grid(row=1, column=0, columnspan=2, pady=10)
+        # Port range
+        tk.Label(input_frame, text="Ports:", font=('Arial', 10, 'bold'),
+                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=1, column=0, sticky='w', padx=5, pady=3)
+        self.nmap_ports = tk.Entry(input_frame, width=20, font=('Arial', 10))
+        self.nmap_ports.grid(row=1, column=1, padx=5, pady=3)
+        self.nmap_ports.insert(0, "1-1000")
+        tk.Label(input_frame, text="(e.g., 80, 1-1000, -)", font=('Arial', 8, 'italic'),
+                bg=COLORS['bg_medium'], fg=COLORS['text_gray']).grid(row=1, column=2, columnspan=2, sticky='w', padx=5)
+        
+        # Scan Type
+        scan_options_frame = tk.LabelFrame(input_frame, text="Scan Options", 
+                                          bg=COLORS['bg_medium'], fg=COLORS['text_white'],
+                                          font=('Arial', 9, 'bold'), bd=2)
+        scan_options_frame.grid(row=2, column=0, columnspan=4, padx=5, pady=10, sticky='ew')
+        
+        # Scan Type dropdown
+        tk.Label(scan_options_frame, text="Scan Type:", font=('Arial', 9, 'bold'),
+                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.nmap_scan_type = ttk.Combobox(scan_options_frame, width=25, font=('Arial', 9), state='readonly')
+        self.nmap_scan_type.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        self.nmap_scan_type['values'] = [
+            '-sS (SYN Stealth Scan)',
+            '-sT (TCP Connect Scan)',
+            '-sU (UDP Scan)',
+            '-sA (ACK Scan)',
+            '-sW (Window Scan)',
+            '-sM (Maimon Scan)',
+            '-sN (Null Scan)',
+            '-sF (FIN Scan)',
+            '-sX (Xmas Scan)',
+            '-sn (Ping Scan - No Port)',
+            '-sV (Version Detection)',
+            '-sS -sV (Stealth + Version)',
+        ]
+        self.nmap_scan_type.current(10)  # Default to -sV
+        
+        # Timing template
+        tk.Label(scan_options_frame, text="Timing:", font=('Arial', 9, 'bold'),
+                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=1, column=0, sticky='w', padx=5, pady=5)
+        self.nmap_timing = ttk.Combobox(scan_options_frame, width=25, font=('Arial', 9), state='readonly')
+        self.nmap_timing.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        self.nmap_timing['values'] = [
+            '-T0 (Paranoid - Very Slow)',
+            '-T1 (Sneaky - Slow)',
+            '-T2 (Polite - Slower)',
+            '-T3 (Normal - Default)',
+            '-T4 (Aggressive - Fast)',
+            '-T5 (Insane - Very Fast)',
+        ]
+        self.nmap_timing.current(3)  # Default to -T3
+        
+        # Additional options checkboxes
+        options_check_frame = tk.Frame(scan_options_frame, bg=COLORS['bg_medium'])
+        options_check_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky='w')
+        
+        self.nmap_option_os = tk.BooleanVar(value=False)
+        tk.Checkbutton(options_check_frame, text="-O (OS Detection)", variable=self.nmap_option_os,
+                      bg=COLORS['bg_medium'], fg=COLORS['text_white'], 
+                      selectcolor=COLORS['bg_dark'], font=('Arial', 9)).pack(side='left', padx=5)
+        
+        self.nmap_option_aggressive = tk.BooleanVar(value=False)
+        tk.Checkbutton(options_check_frame, text="-A (Aggressive)", variable=self.nmap_option_aggressive,
+                      bg=COLORS['bg_medium'], fg=COLORS['text_white'],
+                      selectcolor=COLORS['bg_dark'], font=('Arial', 9)).pack(side='left', padx=5)
+        
+        self.nmap_option_verbose = tk.BooleanVar(value=False)
+        tk.Checkbutton(options_check_frame, text="-v (Verbose)", variable=self.nmap_option_verbose,
+                      bg=COLORS['bg_medium'], fg=COLORS['text_white'],
+                      selectcolor=COLORS['bg_dark'], font=('Arial', 9)).pack(side='left', padx=5)
+        
+        self.nmap_option_scripts = tk.BooleanVar(value=False)
+        tk.Checkbutton(options_check_frame, text="-sC (Default Scripts)", variable=self.nmap_option_scripts,
+                      bg=COLORS['bg_medium'], fg=COLORS['text_white'],
+                      selectcolor=COLORS['bg_dark'], font=('Arial', 9)).pack(side='left', padx=5)
+        
+        # Quick presets
+        preset_frame = tk.LabelFrame(input_frame, text="Quick Presets", 
+                                     bg=COLORS['bg_medium'], fg=COLORS['text_white'],
+                                     font=('Arial', 9, 'bold'), bd=2)
+        preset_frame.grid(row=3, column=0, columnspan=4, padx=5, pady=5, sticky='ew')
+        
+        tk.Button(preset_frame, text="🚀 Quick Scan", command=lambda: self.nmap_set_preset('quick'),
+                 bg=COLORS['info'], fg='white', font=('Arial', 8, 'bold'), width=12).pack(side='left', padx=3, pady=5)
+        tk.Button(preset_frame, text="🎯 Intense Scan", command=lambda: self.nmap_set_preset('intense'),
+                 bg=COLORS['warning'], fg='white', font=('Arial', 8, 'bold'), width=12).pack(side='left', padx=3, pady=5)
+        tk.Button(preset_frame, text="🔍 Comprehensive", command=lambda: self.nmap_set_preset('comprehensive'),
+                 bg=COLORS['danger'], fg='white', font=('Arial', 8, 'bold'), width=12).pack(side='left', padx=3, pady=5)
+        tk.Button(preset_frame, text="👻 Stealth", command=lambda: self.nmap_set_preset('stealth'),
+                 bg=COLORS['accent_purple'], fg='white', font=('Arial', 8, 'bold'), width=12).pack(side='left', padx=3, pady=5)
+        
+        # Command preview
+        tk.Label(input_frame, text="Command:", font=('Arial', 9, 'bold'),
+                bg=COLORS['bg_medium'], fg=COLORS['text_white']).grid(row=4, column=0, sticky='w', padx=5, pady=5)
+        self.nmap_command_preview = tk.Entry(input_frame, font=('Courier', 9), 
+                                             bg=COLORS['bg_dark'], fg=COLORS['accent_cyan'],
+                                             state='readonly')
+        self.nmap_command_preview.grid(row=4, column=1, columnspan=3, padx=5, pady=5, sticky='ew')
+        
+        # Update preview when options change
+        self.nmap_scan_type.bind('<<ComboboxSelected>>', lambda e: self.update_nmap_preview())
+        self.nmap_timing.bind('<<ComboboxSelected>>', lambda e: self.update_nmap_preview())
+        self.nmap_option_os.trace('w', lambda *args: self.update_nmap_preview())
+        self.nmap_option_aggressive.trace('w', lambda *args: self.update_nmap_preview())
+        self.nmap_option_verbose.trace('w', lambda *args: self.update_nmap_preview())
+        self.nmap_option_scripts.trace('w', lambda *args: self.update_nmap_preview())
+        
+        # Scan button
+        tk.Button(input_frame, text="🔍 Start Scan", command=self.do_nmap_scan,
+                 bg=COLORS['accent_green'], fg='white', font=('Arial', 12, 'bold'),
+                 height=2).grid(row=5, column=0, columnspan=4, pady=10, sticky='ew')
         
         # Output
-        output_frame = ttk.LabelFrame(tab, text="Results", padding=5)
+        output_frame = ttk.LabelFrame(tab, text="Scan Results", padding=5)
         output_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
-        self.nmap_output = scrolledtext.ScrolledText(output_frame, height=25,
+        self.nmap_output = scrolledtext.ScrolledText(output_frame, height=20,
                                                      bg=COLORS['bg_dark'],
                                                      fg='#4ecdc4',
                                                      font=('Courier', 9))
         self.nmap_output.pack(fill='both', expand=True)
+        
+        # Initial preview
+        self.update_nmap_preview()
+    
+    def nmap_set_preset(self, preset):
+        """Set nmap scan preset"""
+        if preset == 'quick':
+            # Quick scan: SYN scan, fast timing, common ports
+            self.nmap_scan_type.set('-sS (SYN Stealth Scan)')
+            self.nmap_timing.set('-T4 (Aggressive - Fast)')
+            self.nmap_ports.delete(0, tk.END)
+            self.nmap_ports.insert(0, '1-1000')
+            self.nmap_option_os.set(False)
+            self.nmap_option_aggressive.set(False)
+            self.nmap_option_verbose.set(False)
+            self.nmap_option_scripts.set(False)
+        elif preset == 'intense':
+            # Intense: SYN + Version, aggressive timing, all ports
+            self.nmap_scan_type.set('-sS -sV (Stealth + Version)')
+            self.nmap_timing.set('-T4 (Aggressive - Fast)')
+            self.nmap_ports.delete(0, tk.END)
+            self.nmap_ports.insert(0, '-')
+            self.nmap_option_os.set(False)
+            self.nmap_option_aggressive.set(False)
+            self.nmap_option_verbose.set(True)
+            self.nmap_option_scripts.set(True)
+        elif preset == 'comprehensive':
+            # Comprehensive: Aggressive scan, all features
+            self.nmap_scan_type.set('-sV (Version Detection)')
+            self.nmap_timing.set('-T4 (Aggressive - Fast)')
+            self.nmap_ports.delete(0, tk.END)
+            self.nmap_ports.insert(0, '-')
+            self.nmap_option_os.set(True)
+            self.nmap_option_aggressive.set(True)
+            self.nmap_option_verbose.set(True)
+            self.nmap_option_scripts.set(True)
+        elif preset == 'stealth':
+            # Stealth: Slow, sneaky scan
+            self.nmap_scan_type.set('-sS (SYN Stealth Scan)')
+            self.nmap_timing.set('-T1 (Sneaky - Slow)')
+            self.nmap_ports.delete(0, tk.END)
+            self.nmap_ports.insert(0, '1-1000')
+            self.nmap_option_os.set(False)
+            self.nmap_option_aggressive.set(False)
+            self.nmap_option_verbose.set(False)
+            self.nmap_option_scripts.set(False)
+        
+        self.update_nmap_preview()
+    
+    def update_nmap_preview(self):
+        """Update nmap command preview"""
+        args = []
+        
+        # Scan type
+        scan_type = self.nmap_scan_type.get().split(' ')[0]
+        args.append(scan_type)
+        
+        # Timing
+        timing = self.nmap_timing.get().split(' ')[0]
+        args.append(timing)
+        
+        # Additional options
+        if self.nmap_option_os.get():
+            args.append('-O')
+        if self.nmap_option_aggressive.get():
+            args.append('-A')
+        if self.nmap_option_verbose.get():
+            args.append('-v')
+        if self.nmap_option_scripts.get():
+            args.append('-sC')
+        
+        # Ports
+        ports = self.nmap_ports.get().strip()
+        if ports and ports != '-':
+            args.append(f'-p {ports}')
+        
+        # Target
+        target = self.nmap_target.get().strip()
+        
+        cmd = f"nmap {' '.join(args)} {target}"
+        
+        self.nmap_command_preview.config(state='normal')
+        self.nmap_command_preview.delete(0, tk.END)
+        self.nmap_command_preview.insert(0, cmd)
+        self.nmap_command_preview.config(state='readonly')
     
     def do_nmap_scan(self):
-        """Nmap scan"""
+        """Nmap scan with selected options"""
         target = self.nmap_target.get().strip()
         if not target:
             messagebox.showerror("Error", "Enter target")
             return
         
-        self.nmap_output.insert(tk.END, f"\nScanning {target}...\n")
-        threading.Thread(target=self._nmap_thread, args=(target,), daemon=True).start()
+        # Build arguments
+        args = []
+        
+        # Scan type
+        scan_type = self.nmap_scan_type.get().split(' ')[0]
+        args.append(scan_type)
+        
+        # Timing
+        timing = self.nmap_timing.get().split(' ')[0]
+        args.append(timing)
+        
+        # Ports
+        ports = self.nmap_ports.get().strip()
+        port_arg = None
+        if ports and ports != '-':
+            port_arg = ports
+        
+        # Additional options
+        if self.nmap_option_os.get():
+            args.append('-O')
+        if self.nmap_option_aggressive.get():
+            args.append('-A')
+        if self.nmap_option_verbose.get():
+            args.append('-v')
+        if self.nmap_option_scripts.get():
+            args.append('-sC')
+        
+        arguments = ' '.join(args)
+        
+        self.nmap_output.insert(tk.END, f"\n{'='*70}\n")
+        self.nmap_output.insert(tk.END, f"Scanning {target} with: nmap {arguments}")
+        if port_arg:
+            self.nmap_output.insert(tk.END, f" -p {port_arg}")
+        self.nmap_output.insert(tk.END, f"\n{'='*70}\n")
+        
+        threading.Thread(target=self._nmap_thread, args=(target, arguments, port_arg), daemon=True).start()
     
-    def _nmap_thread(self, target):
-        """Nmap thread"""
-        result = NmapScanner.scan(target)
+    def _nmap_thread(self, target, arguments, ports=None):
+        """Nmap thread with custom arguments"""
+        result = NmapScanner.scan(target, arguments, ports)
         if result['success']:
             out = f"\n{'='*70}\nScan Results\n{'='*70}\n"
             for host, data in result['results'].items():
                 out += f"\nHost: {host} ({data['state']})\n"
+                
+                # OS detection if available
+                if 'osmatch' in data:
+                    out += f"\nOS Detection:\n"
+                    for os in data['osmatch'][:3]:  # Top 3 matches
+                        out += f"  • {os['name']} (Accuracy: {os['accuracy']}%)\n"
+                
+                # Ports
+                out += f"\nOpen Ports:\n"
                 for proto, ports in data['protocols'].items():
                     for port, info in ports.items():
-                        out += f"  {port}/{proto} - {info['state']} - {info['name']}\n"
+                        out += f"  {port}/{proto} - {info['state']} - {info['name']}"
+                        if 'version' in info and info['version']:
+                            out += f" ({info['version']})"
+                        out += "\n"
                 out += "-" * 70 + "\n"
             self.master.after(0, lambda: self.nmap_output.insert(tk.END, out))
             self.nmap_last_results = out
         else:
-            self.master.after(0, lambda: self.nmap_output.insert(tk.END, f"Error: {result['error']}\n"))
+            error_msg = f"\n❌ Error: {result['error']}\n"
+            if 'permission' in result['error'].lower() or 'must be root' in result['error'].lower():
+                error_msg += "\n⚠️  Some scan types (like -sS SYN scan) require root/admin privileges.\n"
+                error_msg += "Try: sudo python3 cybersecurity_toolkit_ML_ENHANCED.py\n"
+                error_msg += "Or use -sT (TCP Connect Scan) which doesn't require root.\n"
+            self.master.after(0, lambda: self.nmap_output.insert(tk.END, error_msg))
     
     def create_whois_tab(self):
         """WHOIS tab"""
